@@ -5,13 +5,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Remote Pump Dashboard</title>
-    <!-- Primary & Fallback Paho MQTT WebSocket Library -->
-    <script src="https://cloudflare.com"></script>
-    <script>
-        if (typeof Paho === "undefined") {
-            document.write('<script src="https://unpkg.com"><\/script>');
-        }
-    </script>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -143,7 +136,7 @@
     <div class="box">
         <h2>Remote Pump Control</h2>
 
-        <p><strong>Broker Status:</strong> <span id="mqtt-status" class="badge bg-amber">DISCONNECTED</span></p>
+        <p><strong>Broker Status:</strong> <span id="mqtt-status" class="badge bg-amber">LOADING LIB...</span></p>
         <p><strong>Pump Status:</strong> <span id="pump-status" class="badge">UNKNOWN</span></p>
 
         <div class="timer-box" id="countdown-box">
@@ -154,7 +147,7 @@
 
         <label for="device-id">Device ID:</label>
         <input type="text" id="device-id" placeholder="e.g. ESP246F28A1B2C3">
-        <button type="button" class="btn-connect" id="btn-connect">Connect to Device</button>
+        <button type="button" class="btn-connect" id="btn-connect" disabled>Connect to Device</button>
 
         <hr>
 
@@ -175,14 +168,68 @@
     </div>
 
     <script>
-        const MQTT_HOST = "://hivemq.com";
-        const MQTT_PORT = 8884;
-        const MQTT_PATH = "/mqtt";
+        const BROKER_URL = "wss://://hivemq.com";
+        const CDN_URLS = [
+            "https://jsdelivr.net",
+            "https://unpkg.com",
+            "https://cloudflare.com"
+        ];
 
         let client = null;
         let activeDeviceId = "";
         let countdownInterval = null;
         let targetEndTimeMs = 0;
+
+        // Dynamically load MQTT.js with automatic CDN failover
+        function loadMqttLibrary(index = 0) {
+            if (typeof mqtt !== "undefined") {
+                onLibraryReady();
+                return;
+            }
+            if (index >= CDN_URLS.length) {
+                updateBrokerBadge("LIB BLOCKED", "bg-red");
+                alert("Unable to load MQTT script from CDNs. Check if an ad-blocker or firewall is blocking jsdelivr/unpkg.");
+                return;
+            }
+
+            const script = document.createElement("script");
+            script.src = CDN_URLS[index];
+            script.async = true;
+            script.onload = function () {
+                if (typeof mqtt !== "undefined") {
+                    onLibraryReady();
+                } else {
+                    loadMqttLibrary(index + 1);
+                }
+            };
+            script.onerror = function () {
+                loadMqttLibrary(index + 1);
+            };
+            document.head.appendChild(script);
+        }
+
+        function onLibraryReady() {
+            updateBrokerBadge("DISCONNECTED", "bg-amber");
+            document.getElementById("btn-connect").disabled = false;
+
+            const urlParams = new URLSearchParams(window.location.search);
+            const urlId = urlParams.get("id");
+            const savedId = localStorage.getItem("pump_device_id");
+            const savedPass = localStorage.getItem("pump_ctrl_pass");
+
+            if (savedPass) {
+                document.getElementById("ctrl-pass").value = savedPass;
+            }
+
+            if (urlId) {
+                document.getElementById("device-id").value = urlId.trim();
+                localStorage.setItem("pump_device_id", urlId.trim());
+                connectMqtt();
+            } else if (savedId) {
+                document.getElementById("device-id").value = savedId;
+                connectMqtt();
+            }
+        }
 
         function saveLocalPrefs() {
             localStorage.setItem("pump_device_id", document.getElementById("device-id").value.trim());
@@ -201,12 +248,7 @@
             badge.className = "badge " + colorClass;
         }
 
-        window.connectMqtt = function () {
-            if (typeof Paho === "undefined" || !Paho.MQTT) {
-                alert("MQTT library failed to load. Please check your internet connection and refresh.");
-                return;
-            }
-
+        function connectMqtt() {
             const idInput = document.getElementById("device-id").value.trim();
             if (!idInput) {
                 alert("Please enter your Device ID (found on the ESP8266 Remote page).");
@@ -216,43 +258,48 @@
             activeDeviceId = idInput;
             saveLocalPrefs();
 
-            if (client && client.isConnected()) {
-                try {client.disconnect();} catch (e) { }
+            if (client) {
+                try {client.end(true);} catch (e) { }
             }
 
             updateBrokerBadge("CONNECTING...", "bg-amber");
             setControlsEnabled(false);
 
             const clientId = "WebDash-" + Math.random().toString(16).substring(2, 10);
-            client = new Paho.MQTT.Client(MQTT_HOST, MQTT_PORT, MQTT_PATH, clientId);
+            client = mqtt.connect(BROKER_URL, {
+                clientId: clientId,
+                clean: true,
+                connectTimeout: 10000,
+                reconnectPeriod: 4000
+            });
 
-            client.onConnectionLost = function (responseObject) {
+            client.on("connect", function () {
+                updateBrokerBadge("CONNECTED", "bg-green");
+                setControlsEnabled(true);
+                client.subscribe(activeDeviceId + "/status");
+            });
+
+            client.on("reconnect", function () {
+                updateBrokerBadge("RECONNECTING...", "bg-amber");
+                setControlsEnabled(false);
+            });
+
+            client.on("close", function () {
                 updateBrokerBadge("DISCONNECTED", "bg-red");
                 setControlsEnabled(false);
-                console.warn("MQTT Connection Lost:", responseObject.errorMessage);
-            };
+            });
 
-            client.onMessageArrived = function (message) {
-                if (message.destinationName === activeDeviceId + "/status") {
-                    handleStatusPayload(message.payloadString);
-                }
-            };
+            client.on("error", function (err) {
+                console.error("MQTT Error:", err);
+                updateBrokerBadge("ERROR", "bg-red");
+            });
 
-            client.connect({
-                useSSL: true,
-                timeout: 10,
-                onSuccess: function () {
-                    updateBrokerBadge("CONNECTED", "bg-green");
-                    setControlsEnabled(true);
-                    client.subscribe(activeDeviceId + "/status");
-                },
-                onFailure: function (err) {
-                    updateBrokerBadge("FAILED", "bg-red");
-                    setControlsEnabled(false);
-                    alert("Could not connect to MQTT broker: " + err.errorMessage);
+            client.on("message", function (topic, payloadBuffer) {
+                if (topic === activeDeviceId + "/status") {
+                    handleStatusPayload(payloadBuffer.toString());
                 }
             });
-        };
+        }
 
         function handleStatusPayload(payload) {
             const badge = document.getElementById("pump-status");
@@ -268,8 +315,8 @@
                 // Format from ESP8266: "ON:<low32EpochMs>:<runLimitMs>"
                 const parts = payload.split(":");
                 if (parts.length === 3) {
-                    const startLow32 = parseInt(parts[1], 10);
-                    const runLimitMs = parseInt(parts[2], 10);
+                    const startLow32 = parseInt(parts, 10);
+                    const runLimitMs = parseInt(parts, 10);
 
                     const nowMs = Date.now();
                     const highBits = Math.floor(nowMs / 4294967296) * 4294967296;
@@ -318,21 +365,16 @@
                 alert("Please enter your Hardware Control Password.");
                 return;
             }
-            if (!client || !client.isConnected()) {
+            if (!client || !client.connected) {
                 alert("Not connected to MQTT broker.");
                 return;
             }
-
             saveLocalPrefs();
-            const msg = new Paho.MQTT.Message(`${cmd}:${pass}`);
-            msg.destinationName = activeDeviceId + "/command";
-            client.send(msg);
+            client.publish(activeDeviceId + "/command", ${cmd}: ${pass});
         }
-
         function sendDuration() {
             const pass = document.getElementById("ctrl-pass").value;
             const hours = parseFloat(document.getElementById("duration-hours").value);
-
             if (!pass) {
                 alert("Please enter your Hardware Control Password.");
                 return;
@@ -341,40 +383,21 @@
                 alert("Please enter a valid number of hours greater than 0.");
                 return;
             }
-            if (!client || !client.isConnected()) {
+            if (!client || !client.connected) {
                 alert("Not connected to MQTT broker.");
                 return;
             }
-
             saveLocalPrefs();
-            const msg = new Paho.MQTT.Message(`${hours}:${pass}`);
-            msg.destinationName = activeDeviceId + "/duration";
-            client.send(msg);
-            alert(`Sent new auto-shutoff duration: ${hours} hour(s).`);
+            client.publish(activeDeviceId + "/duration", ${hours}: ${pass});
+            alert(Sent new auto - shutoff duration: ${hours} hour(s).);
         }
-
-        // Attach event listeners cleanly after DOM loads
         document.addEventListener("DOMContentLoaded", function () {
-            document.getElementById("btn-connect").addEventListener("click", window.connectMqtt);
+            document.getElementById("btn-connect").addEventListener("click", connectMqtt);
             document.getElementById("btn-start").addEventListener("click", function () {sendCommand("1");});
             document.getElementById("btn-stop").addEventListener("click", function () {sendCommand("0");});
             document.getElementById("btn-dur").addEventListener("click", sendDuration);
             document.getElementById("ctrl-pass").addEventListener("change", saveLocalPrefs);
-            const urlParams = new URLSearchParams(window.location.search);
-            const urlId = urlParams.get("id");
-            const savedId = localStorage.getItem("pump_device_id");
-            const savedPass = localStorage.getItem("pump_ctrl_pass");
-            if (savedPass) {
-                document.getElementById("ctrl-pass").value = savedPass;
-            }
-            if (urlId) {
-                document.getElementById("device-id").value = urlId.trim();
-                localStorage.setItem("pump_device_id", urlId.trim());
-                window.connectMqtt();
-            } else if (savedId) {
-                document.getElementById("device-id").value = savedId;
-                window.connectMqtt();
-            }
+            loadMqttLibrary(0);
         });
     </script>
 </body>
