@@ -170,10 +170,10 @@
     <script>
         const BROKER_URL = "wss://://hivemq.com";
         const CDN_URLS = [
-            "https://jsdelivr.net",
-            "https://unpkg.com",
-            "https://cloudflare.com"
-        ];
+        "./mqtt.min.js",
+        "https://cdnjs.cloudflare.com/ajax/libs/mqtt/5.15.2/mqtt.min.js"
+    ];
+       
 
         let client = null;
         let activeDeviceId = "";
