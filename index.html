@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Remote Pump Dashboard</title>
+    <!-- Paho MQTT JavaScript Client over Secure WebSockets -->
+    <script src="https://cloudflare.com"></script>
+    <style>
+        body { font-family: Arial, sans-serif; text-align: center; padding: 20px; background: #f4f4f9; margin: 0; }
+        .box { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); display: inline-block; width: 340px; max-width: 92%; text-align: left; margin-top: 15px; }
+        h2 { margin-top: 0; color: #222; text-align: center; }
+        .badge { display: inline-block; padding: 5px 12px; border-radius: 20px; font-size: 13px; font-weight: bold; color: white; background: #6c757d; }
+        .bg-green { background: #28a745; }
+        .bg-red { background: #dc3545; }
+        .bg-amber { background: #fd7e14; }
+        input[type=text], input[type=password], input[type=number] { width: 100%; box-sizing: border-box; padding: 10px; margin: 6px 0 12px 0; border: 1px solid #ccc; border-radius: 5px; font-size: 14px; }
+        .btn-row { display: flex; gap: 10px; margin-top: 8px; }
+        button { flex: 1; padding: 12px; color: white; border: none; border-radius: 5px; font-weight: bold; cursor: pointer; font-size: 15px; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        .btn-start { background: #28a745; }
+        .btn-stop { background: #dc3545; }
+        .btn-info { background: #17a2b8; width: 100%; }
+        .btn-connect { background: #007bff; width: 100%; }
+        .timer-box { background: #e9ecef; padding: 12px; border-radius: 6px; text-align: center; margin: 12px 0; font-size: 16px; font-weight: bold; color: #333; }
+        hr { border: 0; border-top: 1px solid #eee; margin: 18px 0; }
+        .small-note { font-size: 12px; color: #666; margin-top: 4px; }
+    </style>
+</head>
+<body>
+
+<div class="box">
+    <h2>Remote Pump Control</h2>
+
+    <p><strong>Broker Status:</strong> <span id="mqtt-status" class="badge bg-amber">DISCONNECTED</span></p>
+    <p><strong>Pump Status:</strong> <span id="pump-status" class="badge">UNKNOWN</span></p>
+
+    <div class="timer-box" id="countdown-box">
+        Remaining Time: <span id="countdown-text">--:--:--</span>
+    </div>
+
+    <hr>
+
+    <label for="device-id">Device ID:</label>
+    <input type="text" id="device-id" placeholder="e.g. ESP246F28A1B2C3">
+    <button class="btn-connect" onclick="connectMqtt()">Connect to Device</button>
+
+    <hr>
+
+    <label for="ctrl-pass">Hardware Control Password:</label>
+    <input type="password" id="ctrl-pass" placeholder="Enter device password" onchange="saveLocalPrefs()">
+
+    <div class="btn-row">
+        <button id="btn-start" class="btn-start" onclick="sendCommand('1')" disabled>START</button>
+        <button id="btn-stop" class="btn-stop" onclick="sendCommand('0')" disabled>STOP</button>
+    </div>
+
+    <hr>
+
+    <label for="duration-hours">Set Run Duration (Hours):</label>
+    <input type="number" id="duration-hours" step="0.1" min="0.1" value="1.0">
+    <button id="btn-dur" class="btn-info" onclick="sendDuration()" disabled>Update Auto-Shutoff Limit</button>
+    <div class="small-note">Updates the maximum run duration before automatic shutoff.</div>
+</div>
+
+<script>
+    // HiveMQ Public Broker Secure WebSocket Settings (Required for HTTPS GitHub Pages)
+    const MQTT_HOST = "://hivemq.com";
+    const MQTT_PORT = 8884;
+    const MQTT_PATH = "/mqtt";
+
+    let client = null;
+    let activeDeviceId = "";
+    let countdownInterval = null;
+    let targetEndTimeMs = 0;
+
+    // Load Device ID from URL (?id=ESP...) or browser localStorage
+    window.onload = function() {
+        const urlParams = new URLSearchParams(window.location.search);
+        const urlId = urlParams.get("id");
+        const savedId = localStorage.getItem("pump_device_id");
+        const savedPass = localStorage.getItem("pump_ctrl_pass");
+
+        if (savedPass) {
+            document.getElementById("ctrl-pass").value = savedPass;
+        }
+
+        if (urlId) {
+            document.getElementById("device-id").value = urlId.trim();
+            localStorage.setItem("pump_device_id", urlId.trim());
+            connectMqtt();
+        } else if (savedId) {
+            document.getElementById("device-id").value = savedId;
+            connectMqtt();
+        }
+    };
+
+    function saveLocalPrefs() {
+        localStorage.setItem("pump_device_id", document.getElementById("device-id").value.trim());
+        localStorage.setItem("pump_ctrl_pass", document.getElementById("ctrl-pass").value);
+    }
+
+    function setControlsEnabled(enabled) {
+        document.getElementById("btn-start").disabled = !enabled;
+        document.getElementById("btn-stop").disabled = !enabled;
+        document.getElementById("btn-dur").disabled = !enabled;
+    }
+
+    function connectMqtt() {
+        const idInput = document.getElementById("device-id").value.trim();
+        if (!idInput) {
+            alert("Please enter your Device ID (found on the ESP8266 Remote page).");
+            return;
+        }
+
+        activeDeviceId = idInput;
+        saveLocalPrefs();
+
+        if (client && client.isConnected()) {
+            client.disconnect();
+        }
+
+        updateBrokerBadge("CONNECTING...", "bg-amber");
+        setControlsEnabled(false);
+
+        const clientId = "WebDash-" + Math.random().toString(16).substring(2, 10);
+        client = new Paho.MQTT.Client(MQTT_HOST, MQTT_PORT, MQTT_PATH, clientId);
+
+        client.onConnectionLost = function(responseObject) {
+            updateBrokerBadge("DISCONNECTED", "bg-red");
+            setControlsEnabled(false);
+            console.warn("MQTT Connection Lost:", responseObject.errorMessage);
+        };
+
+        client.onMessageArrived = function(message) {
+            const topic = message.destinationName;
+            const payload = message.payloadString;
+            if (topic === activeDeviceId + "/status") {
+                handleStatusPayload(payload);
+            }
+        };
+
+        client.connect({
+            useSSL: true,
+            timeout: 10,
+            onSuccess: function() {
+                updateBrokerBadge("CONNECTED", "bg-green");
+                setControlsEnabled(true);
+                client.subscribe(activeDeviceId + "/status");
+            },
+            onFailure: function(err) {
+                updateBrokerBadge("FAILED", "bg-red");
+                setControlsEnabled(false);
+                alert("Could not connect to MQTT broker: " + err.errorMessage);
+            }
+        });
+    }
+
+    function handleStatusPayload(payload) {
+        const badge = document.getElementById("pump-status");
+
+        if (payload === "OFF" || payload === "OFFLINE") {
+            badge.textContent = payload;
+            badge.className = "badge bg-red";
+            stopCountdown();
+        } else if (payload.startsWith("ON")) {
+            badge.textContent = "RUNNING";
+            badge.className = "badge bg-green";
+
+            // Expected format from ESP8266: "ON:<low32EpochMs>:<runLimitMs>"
+            const parts = payload.split(":");
+            if (parts.length === 3) {
+                const startLow32 = parseInt(parts[1], 10);
+                const runLimitMs = parseInt(parts[2], 10);
+
+                // Reconstruct full 64-bit epoch start timestamp using current browser clock
+                const nowMs = Date.now();
+                const highBits = Math.floor(nowMs / 4294967296) * 4294967296;
+                let reconstructedStartMs = highBits + (startLow32 >>> 0);
+
+                // Adjust if a 32-bit rollover boundary occurred
+                if (reconstructedStartMs > nowMs + 60000) {
+                    reconstructedStartMs -= 4294967296;
+                }
+
+                targetEndTimeMs = reconstructedStartMs + runLimitMs;
+                startCountdown();
+            }
+        }
+    }
+
+    function startCountdown() {
+        stopCountdown();
+        updateCountdownDisplay();
+        countdownInterval = setInterval(updateCountdownDisplay, 1000);
+    }
+
+    function stopCountdown() {
+        if (countdownInterval) {
+            clearInterval(countdownInterval);
+            countdownInterval = null;
+        }
+        document.getElementById("countdown-text").textContent = "--:--:--";
+    }
+
+    function updateCountdownDisplay() {
+        const remainingMs = targetEndTimeMs - Date.now();
+        if (remainingMs <= 0) {
+            document.getElementById("countdown-text").textContent = "00:00:00";
+            return;
+        }
+        const totalSecs = Math.floor(remainingMs / 1000);
+        const hrs = String(Math.floor(totalSecs / 3600)).padStart(2, "0");
+        const mins = String(Math.floor((totalSecs % 3600) / 60)).padStart(2, "0");
+        const secs = String(totalSecs % 60).padStart(2, "0");
+        document.getElementById("countdown-text").textContent = `${hrs}:${mins}:${secs}`;
+    }
+
+    function sendCommand(cmd) {
+        const pass = document.getElementById("ctrl-pass").value;
+        if (!pass) {
+            alert("Please enter your Hardware Control Password.");
+            return;
+        }
+        if (!client || !client.isConnected()) {
+            alert("Not connected to MQTT broker.");
+            return;
+        }
+
+        saveLocalPrefs();
+        const payload = `${cmd}:${pass}`;
+        const msg = new Paho.MQTT.Message(payload);
+        msg.destinationName = activeDeviceId + "/command";
+        client.send(msg);
+    }
+
+    function sendDuration() {
+        const pass = document.getElementById("ctrl-pass").value;
+        const hours = parseFloat(document.getElementById("duration-hours").value);
+
+        if (!pass) {
+            alert("Please enter your Hardware Control Password.");
+            return;
+        }
+        if (isNaN(hours) || hours <= 0) {
