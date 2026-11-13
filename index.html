@@ -5,6 +5,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Remote Pump Dashboard</title>
+    <!-- Non-blocking MQTT.js client from jsDelivr CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mqtt/5.15.2/mqtt.min.js" defer></script>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -136,7 +138,7 @@
     <div class="box">
         <h2>Remote Pump Control</h2>
 
-        <p><strong>Broker Status:</strong> <span id="mqtt-status" class="badge bg-amber">LOADING LIB...</span></p>
+        <p><strong>Broker Status:</strong> <span id="mqtt-status" class="badge bg-amber">DISCONNECTED</span></p>
         <p><strong>Pump Status:</strong> <span id="pump-status" class="badge">UNKNOWN</span></p>
 
         <div class="timer-box" id="countdown-box">
@@ -147,7 +149,7 @@
 
         <label for="device-id">Device ID:</label>
         <input type="text" id="device-id" placeholder="e.g. ESP246F28A1B2C3">
-        <button type="button" class="btn-connect" id="btn-connect" disabled>Connect to Device</button>
+        <button type="button" class="btn-connect" id="btn-connect">Connect to Device</button>
 
         <hr>
 
@@ -169,67 +171,11 @@
 
     <script>
         const BROKER_URL = "wss://://hivemq.com";
-        const CDN_URLS = [
-        "./mqtt.min.js",
-        "https://cdnjs.cloudflare.com/ajax/libs/mqtt/5.15.2/mqtt.min.js"
-    ];
-       
 
         let client = null;
         let activeDeviceId = "";
         let countdownInterval = null;
         let targetEndTimeMs = 0;
-
-        // Dynamically load MQTT.js with automatic CDN failover
-        function loadMqttLibrary(index = 0) {
-            if (typeof mqtt !== "undefined") {
-                onLibraryReady();
-                return;
-            }
-            if (index >= CDN_URLS.length) {
-                updateBrokerBadge("LIB BLOCKED", "bg-red");
-                alert("Unable to load MQTT script from CDNs. Check if an ad-blocker or firewall is blocking jsdelivr/unpkg.");
-                return;
-            }
-
-            const script = document.createElement("script");
-            script.src = CDN_URLS[index];
-            script.async = true;
-            script.onload = function () {
-                if (typeof mqtt !== "undefined") {
-                    onLibraryReady();
-                } else {
-                    loadMqttLibrary(index + 1);
-                }
-            };
-            script.onerror = function () {
-                loadMqttLibrary(index + 1);
-            };
-            document.head.appendChild(script);
-        }
-
-        function onLibraryReady() {
-            updateBrokerBadge("DISCONNECTED", "bg-amber");
-            document.getElementById("btn-connect").disabled = false;
-
-            const urlParams = new URLSearchParams(window.location.search);
-            const urlId = urlParams.get("id");
-            const savedId = localStorage.getItem("pump_device_id");
-            const savedPass = localStorage.getItem("pump_ctrl_pass");
-
-            if (savedPass) {
-                document.getElementById("ctrl-pass").value = savedPass;
-            }
-
-            if (urlId) {
-                document.getElementById("device-id").value = urlId.trim();
-                localStorage.setItem("pump_device_id", urlId.trim());
-                connectMqtt();
-            } else if (savedId) {
-                document.getElementById("device-id").value = savedId;
-                connectMqtt();
-            }
-        }
 
         function saveLocalPrefs() {
             localStorage.setItem("pump_device_id", document.getElementById("device-id").value.trim());
@@ -249,6 +195,11 @@
         }
 
         function connectMqtt() {
+            if (typeof mqtt === "undefined") {
+                alert("MQTT library is still loading or blocked by your network. Please refresh the page.");
+                return;
+            }
+
             const idInput = document.getElementById("device-id").value.trim();
             if (!idInput) {
                 alert("Please enter your Device ID (found on the ESP8266 Remote page).");
@@ -312,7 +263,6 @@
                 badge.textContent = "RUNNING";
                 badge.className = "badge bg-green";
 
-                // Format from ESP8266: "ON:<low32EpochMs>:<runLimitMs>"
                 const parts = payload.split(":");
                 if (parts.length === 3) {
                     const startLow32 = parseInt(parts, 10);
@@ -369,12 +319,15 @@
                 alert("Not connected to MQTT broker.");
                 return;
             }
+
             saveLocalPrefs();
-            client.publish(activeDeviceId + "/command", ${cmd}: ${pass});
+            client.publish(activeDeviceId + "/command", `${cmd}:${pass}`);
         }
+
         function sendDuration() {
             const pass = document.getElementById("ctrl-pass").value;
             const hours = parseFloat(document.getElementById("duration-hours").value);
+
             if (!pass) {
                 alert("Please enter your Hardware Control Password.");
                 return;
@@ -387,17 +340,34 @@
                 alert("Not connected to MQTT broker.");
                 return;
             }
+
             saveLocalPrefs();
-            client.publish(activeDeviceId + "/duration", ${hours}: ${pass});
-            alert(Sent new auto - shutoff duration: ${hours} hour(s).);
+            client.publish(activeDeviceId + "/duration", `${hours}:${pass}`);
+            alert(`Sent new auto-shutoff duration: ${hours} hour(s).`);
         }
+
         document.addEventListener("DOMContentLoaded", function () {
             document.getElementById("btn-connect").addEventListener("click", connectMqtt);
             document.getElementById("btn-start").addEventListener("click", function () {sendCommand("1");});
             document.getElementById("btn-stop").addEventListener("click", function () {sendCommand("0");});
             document.getElementById("btn-dur").addEventListener("click", sendDuration);
             document.getElementById("ctrl-pass").addEventListener("change", saveLocalPrefs);
-            loadMqttLibrary(0);
+
+            const urlParams = new URLSearchParams(window.location.search);
+            const urlId = urlParams.get("id");
+            const savedId = localStorage.getItem("pump_device_id");
+            const savedPass = localStorage.getItem("pump_ctrl_pass");
+            if (savedPass) {
+                document.getElementById("ctrl-pass").value = savedPass;
+            }
+            if (urlId) {
+                document.getElementById("device-id").value = urlId.trim();
+                localStorage.setItem("pump_device_id", urlId.trim());
+                connectMqtt();
+            } else if (savedId) {
+                document.getElementById("device-id").value = savedId;
+                connectMqtt();
+            }
         });
     </script>
 </body>
