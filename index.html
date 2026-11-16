@@ -252,22 +252,24 @@
             });
         }
 
-        function handleStatusPayload(payload) {
-            const badge = document.getElementById("pump-status");
+       function handleStatusPayload(payload) {
+        const badge = document.getElementById("pump-status");
 
-            if (payload === "OFF" || payload === "OFFLINE") {
-                badge.textContent = payload;
-                badge.className = "badge bg-red";
-                stopCountdown();
-            } else if (payload.startsWith("ON")) {
-                badge.textContent = "RUNNING";
-                badge.className = "badge bg-green";
+        if (payload === "OFF" || payload === "OFFLINE") {
+            badge.textContent = payload;
+            badge.className = "badge bg-red";
+            stopCountdown();
+        } else if (payload.startsWith("ON")) {
+            badge.textContent = "RUNNING";
+            badge.className = "badge bg-green";
 
-                const parts = payload.split(":");
-                if (parts.length === 3) {
-                    const startLow32 = parseInt(parts, 10);
-                    const runLimitMs = parseInt(parts, 10);
+            // Format from ESP8266: "ON:<low32EpochMs>:<runLimitMs>"
+            const parts = payload.split(":");
+            if (parts.length === 3) {
+                const startLow32 = parseInt(parts, 10);
+                const runLimitMs = parseInt(parts, 10);
 
+                if (!isNaN(startLow32) && !isNaN(runLimitMs)) {
                     const nowMs = Date.now();
                     const highBits = Math.floor(nowMs / 4294967296) * 4294967296;
                     let reconstructedStartMs = highBits + (startLow32 >>> 0);
@@ -281,6 +283,8 @@
                 }
             }
         }
+    }
+
 
         function startCountdown() {
             stopCountdown();
