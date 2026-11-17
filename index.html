@@ -266,8 +266,8 @@
             // Format from ESP8266: "ON:<low32EpochMs>:<runLimitMs>"
             const parts = payload.split(":");
             if (parts.length === 3) {
-                const startLow32 = parseInt(parts, 10);
-                const runLimitMs = parseInt(parts, 10);
+                const startLow32 = parseInt(parts[1], 10);
+                const runLimitMs = parseInt(parts[2], 10);
 
                 if (!isNaN(startLow32) && !isNaN(runLimitMs)) {
                     const nowMs = Date.now();
